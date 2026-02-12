@@ -1,0 +1,11 @@
+package com.example.commerce.common.error
+
+/**
+ * 전역 에러 응답 코드. RestControllerAdvice에서 HTTP 상태별로 매핑.
+ */
+enum class ErrorCode(val code: String) {
+    PRODUCT_NOT_FOUND("PRODUCT_NOT_FOUND"),
+    INVENTORY_NOT_FOUND("INVENTORY_NOT_FOUND"),
+    OUT_OF_STOCK("OUT_OF_STOCK"),
+    INVALID_REQUEST("INVALID_REQUEST"),
+}

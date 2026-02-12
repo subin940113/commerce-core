@@ -1,0 +1,13 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: commerce-core-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: commerce_core
+      POSTGRES_USER: commerce
+      POSTGRES_PASSWORD: commerce
+      TZ: Asia/Seoul
+    volumes:
+      - ./local-data/postgres:/var/lib/postgresql/data

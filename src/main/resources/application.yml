@@ -1,0 +1,22 @@
+spring:
+  application:
+    name: commerce-core
+  datasource:
+    url: jdbc:postgresql://localhost:5432/commerce_core
+    username: commerce
+    password: commerce
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        format_sql: true
+  flyway:
+    enabled: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus

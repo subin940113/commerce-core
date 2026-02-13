@@ -29,7 +29,7 @@ class Order(
 
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 30)
-    val status: OrderStatus,
+    var status: OrderStatus,
 
     @Column(name = "total_amount", nullable = false)
     val totalAmount: Long,

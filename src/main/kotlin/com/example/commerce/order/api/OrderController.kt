@@ -1,5 +1,7 @@
 package com.example.commerce.order.api
 
+import com.example.commerce.common.api.ApiResponse
+import com.example.commerce.common.api.ApiResponseSupport
 import com.example.commerce.order.application.CreateOrderCommand
 import com.example.commerce.order.application.CreateOrderResult
 import com.example.commerce.order.application.OrderApplicationService
@@ -24,13 +26,13 @@ class OrderController(
 
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
-    fun createOrder(@Valid @RequestBody request: CreateOrderRequest): CreateOrderResponse {
+    fun createOrder(@Valid @RequestBody request: CreateOrderRequest): ApiResponse<CreateOrderResponse> {
         val command = CreateOrderCommand(
             userId = request.userId,
             items = request.items.map { OrderItemCommand(it.productId, it.qty) },
         )
         val result = orderApplicationService.createOrder(command)
-        return toResponse(result)
+        return ApiResponseSupport.success(toResponse(result))
     }
 
     private fun toResponse(result: CreateOrderResult): CreateOrderResponse =

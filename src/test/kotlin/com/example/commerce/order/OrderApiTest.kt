@@ -43,9 +43,10 @@ class OrderApiTest {
                 .content("""{"userId":1,"items":[{"productId":1,"qty":2},{"productId":2,"qty":1}]}"""),
         )
             .andExpect(status().isCreated)
-            .andExpect(jsonPath("$.orderId").isNumber)
-            .andExpect(jsonPath("$.status").value("CREATED"))
-            .andExpect(jsonPath("$.payableAmount").value(35000))
+            .andExpect(jsonPath("$.success").value(true))
+            .andExpect(jsonPath("$.data.orderId").isNumber)
+            .andExpect(jsonPath("$.data.status").value("CREATED"))
+            .andExpect(jsonPath("$.data.payableAmount").value(35000))
     }
 
     @Test
@@ -56,8 +57,9 @@ class OrderApiTest {
                 .content("""{"userId":1,"items":[{"productId":1,"qty":99999}]}"""),
         )
             .andExpect(status().isConflict)
-            .andExpect(jsonPath("$.code").value("OUT_OF_STOCK"))
-            .andExpect(jsonPath("$.message").exists())
+            .andExpect(jsonPath("$.success").value(false))
+            .andExpect(jsonPath("$.error.code").value("OUT_OF_STOCK"))
+            .andExpect(jsonPath("$.error.message").exists())
     }
 
     @Test
@@ -68,7 +70,8 @@ class OrderApiTest {
                 .content("""{"userId":1,"items":[{"productId":1,"qty":0}]}"""),
         )
             .andExpect(status().isBadRequest)
-            .andExpect(jsonPath("$.code").value("INVALID_REQUEST"))
+            .andExpect(jsonPath("$.success").value(false))
+            .andExpect(jsonPath("$.error.code").value("INVALID_REQUEST"))
     }
 
     @Test
@@ -79,7 +82,8 @@ class OrderApiTest {
                 .content("""{"userId":1,"items":[{"productId":99999,"qty":1}]}"""),
         )
             .andExpect(status().isNotFound)
-            .andExpect(jsonPath("$.code").value("PRODUCT_NOT_FOUND"))
+            .andExpect(jsonPath("$.success").value(false))
+            .andExpect(jsonPath("$.error.code").value("PRODUCT_NOT_FOUND"))
     }
 
     @Test
@@ -90,9 +94,9 @@ class OrderApiTest {
                 .content("""{"userId":1,"items":[{"productId":1,"qty":1},{"productId":1,"qty":2}]}"""),
         )
             .andExpect(status().isCreated)
-            .andExpect(jsonPath("$.orderId").isNumber)
-            .andExpect(jsonPath("$.status").value("CREATED"))
-            .andExpect(jsonPath("$.payableAmount").value(30000))
+            .andExpect(jsonPath("$.data.orderId").isNumber)
+            .andExpect(jsonPath("$.data.status").value("CREATED"))
+            .andExpect(jsonPath("$.data.payableAmount").value(30000))
 
         val inventory = inventoryRepository.findById(1L).orElseThrow()
         assertThat(inventory.reservedQty).isEqualTo(3)
@@ -106,7 +110,7 @@ class OrderApiTest {
                 .content("""{"userId":1,"items":[]}"""),
         )
             .andExpect(status().isBadRequest)
-            .andExpect(jsonPath("$.code").value("INVALID_REQUEST"))
+            .andExpect(jsonPath("$.error.code").value("INVALID_REQUEST"))
     }
 
     @Test
@@ -117,6 +121,6 @@ class OrderApiTest {
                 .content("""{"userId":1,"items":[{"productId":0,"qty":1}]}"""),
         )
             .andExpect(status().isBadRequest)
-            .andExpect(jsonPath("$.code").value("INVALID_REQUEST"))
+            .andExpect(jsonPath("$.error.code").value("INVALID_REQUEST"))
     }
 }

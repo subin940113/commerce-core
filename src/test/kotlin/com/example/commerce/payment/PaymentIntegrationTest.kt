@@ -32,7 +32,7 @@ import org.springframework.transaction.support.TransactionTemplate
 @Import(TestcontainersConfiguration::class)
 @SpringBootTest
 @AutoConfigureMockMvc
-class PaymentFlowTest {
+class PaymentIntegrationTest {
 
     @Autowired
     private lateinit var mockMvc: MockMvc

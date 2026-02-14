@@ -4,8 +4,8 @@ import com.example.commerce.common.api.ApiResponse
 import com.example.commerce.common.api.ApiResponseSupport
 import com.example.commerce.order.application.CreateOrderCommand
 import com.example.commerce.order.application.CreateOrderResult
-import com.example.commerce.order.application.OrderApplicationService
 import com.example.commerce.order.application.OrderItemCommand
+import com.example.commerce.order.application.usecase.CreateOrderUseCase
 import jakarta.validation.Valid
 import org.springframework.http.HttpStatus
 import org.springframework.web.bind.annotation.PostMapping
@@ -21,7 +21,7 @@ import org.springframework.web.bind.annotation.RestController
 @RestController
 @RequestMapping("/api/v1/orders")
 class OrderController(
-    private val orderApplicationService: OrderApplicationService,
+    private val createOrderUseCase: CreateOrderUseCase,
 ) {
 
     @PostMapping
@@ -31,7 +31,7 @@ class OrderController(
             userId = request.userId,
             items = request.items.map { OrderItemCommand(it.productId, it.qty) },
         )
-        val result = orderApplicationService.createOrder(command)
+        val result = createOrderUseCase.execute(command)
         return ApiResponseSupport.success(toResponse(result))
     }
 

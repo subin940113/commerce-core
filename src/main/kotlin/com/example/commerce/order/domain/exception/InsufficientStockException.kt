@@ -1,12 +1,13 @@
 package com.example.commerce.order.domain.exception
 
-/**
- * 재고 부족 (가용 예약 수량 = available_qty - reserved_qty 기준).
- */
+import com.example.commerce.common.error.DomainException
+import com.example.commerce.common.error.ErrorCode
+
 class InsufficientStockException(
     val productId: Long,
     val availableToReserve: Int,
     val requested: Int,
-) : RuntimeException(
+) : DomainException(
+    ErrorCode.OUT_OF_STOCK,
     "Insufficient stock for productId=$productId (availableToReserve=$availableToReserve, requested=$requested)",
 )

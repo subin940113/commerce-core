@@ -1,105 +1,140 @@
 # commerce-core
 
-Spring Boot + Kotlin으로 구현한 커머스 백엔드 설계 프로젝트입니다.
-
-주문 → 결제 → 배송 흐름을 단계적으로 구현하면서  
-동시성 제어, 결제 멱등성, 이벤트 기반 처리 같은 실제 운영 환경에서 필요한 설계를 다루는 것을 목표로 합니다.
+Spring Boot + Kotlin 기반 커머스 서버. 주문 → 결제 → 배송 흐름에서 동시성, 멱등성, 이벤트 발행 구조를 구현한다.
 
 ---
 
-## 왜 만들었는가
+## 목차
 
-커머스 시스템은 기능 자체보다도 다음과 같은 문제가 더 중요하다고 생각했습니다.
-
-- 동시에 주문이 들어올 때 재고가 정확히 차감되는가
-- 결제 API가 중복 호출되면 어떻게 되는가
-- 외부 웹훅이 여러 번 오면 어떻게 처리할 것인가
-- 트랜잭션과 이벤트 발행을 어떻게 연결할 것인가
-
-이 프로젝트는 이런 문제를 코드 수준에서 직접 구현하고 테스트해보는 데 초점을 두고 있습니다.
-
----
-
-## 현재 구현 범위
-
-### 주문 (Order)
-
-- 주문 생성
-- 금액 스냅샷 저장
-- 재고 예약 처리
-- 상태: `CREATED` → 결제 시도 시 `PAYMENT_PENDING` → 웹훅 결과에 따라 `PAID` / `PAYMENT_FAILED`
-
-재고는 `available_qty` / `reserved_qty` 두 값으로 관리하며,  
-가용 수량은 `available_qty - reserved_qty`로 계산합니다.
-
-주문 생성 시:
-
-1. `SELECT ... FOR UPDATE`로 재고 행을 잠급니다.
-2. 가용 수량을 검증합니다.
-3. `reserved_qty`를 증가시킵니다.
-
-동시에 여러 요청이 들어와도 초과 예약이 발생하지 않도록 통합 테스트로 검증하고 있습니다.
-
-### 결제 (Payment) — 웹훅 기반
-
-결제 승인은 클라이언트 호출이 아니라 **PG 측 서버-서버 웹훅**으로 처리하는 방식으로 설계했습니다.
-
-- **결제 시도 생성** `POST /api/v1/payments`: 주문 ID로 결제 레코드 생성, 주문 상태를 `PAYMENT_PENDING`으로 변경
-- **모의 웹훅** `POST /api/v1/payments/webhooks/mock`: PG가 호출한다고 가정한 웹훅 수신
-  - **멱등 처리**: `provider` + `providerEventId`로 이미 처리된 이벤트면 200 OK로 이전과 동일한 결과만 반환 (중복 반영 없음)
-  - **승인(AUTHORIZED)**: 주문 `PAID`, 결제 `AUTHORIZED`, 재고 확정 차감 (`available_qty`·`reserved_qty` 감소)
-  - **실패(FAILED)**: 주문 `PAYMENT_FAILED`, 결제 `FAILED`, 예약만 해제 (`reserved_qty` 감소)
-- 재고 확정/해제 시에도 `FOR UPDATE`로 행을 잠근 뒤 처리합니다.
+- [비즈니스 흐름](#비즈니스-흐름)
+- [API 개요](#api-개요)
+- [설계 요약](#설계-요약)
+- [프로젝트 구조](#프로젝트-구조)
+- [에러 처리](#에러-처리)
+- [테스트](#테스트)
+- [로컬 실행](#로컬-실행)
+- [Tech Stack](#tech-stack)
 
 ---
 
-## 설계 방향
+## 비즈니스 흐름
 
-### 레이어 구조
+1. **주문 생성** — 재고 예약(`reserved` 증가). 결제 전까지 `available`은 유지.
+2. **결제 시도** — 주문 상태를 `PAYMENT_PENDING`으로 변경.
+3. **결제 승인** — 두 경로 지원.
+   - **승인 API**: `POST /payments/{id}/authorize` + `Idempotency-Key` (클라이언트 재시도 대비).
+   - **웹훅**: PG → 서버 콜백, `providerEventId` 기준 멱등.
+4. **승인 처리** — 주문 상태를 PAID로 변경, 재고 확정 차감, Outbox에 `PAYMENT_AUTHORIZED` 기록(같은 트랜잭션).
+5. **Outbox 발행** — PENDING 이벤트를 RabbitMQ로 발행. 다중 인스턴스 시 `FOR UPDATE SKIP LOCKED`로 분배.
+6. **배송 생성** — Consumer가 큐에서 수신 후 `CreateShipmentUseCase` 호출. `order_id` UNIQUE로 멱등.
 
-도메인 단위로 패키지를 나누고, 내부는 다음과 같이 구성했습니다.
+자세한 단계·보장 성질은 [docs/flow.md](docs/flow.md) 참고.
+
+---
+
+## API 개요
+
+| 구분 | Method | 경로 | 비고 |
+|------|--------|------|------|
+| 주문 생성 | POST | `/api/v1/orders` | body: userId, items |
+| 결제 시도 | POST | `/api/v1/payments` | body: orderId |
+| 결제 승인 | POST | `/api/v1/payments/{paymentId}/authorize` | Header: `Idempotency-Key` 필수, body: result(AUTHORIZED/FAILED), providerPaymentId(선택) |
+| 결제 웹훅(모의) | POST | `/api/v1/payments/webhooks/mock` | body: provider, providerEventId, paymentId, result |
+
+응답은 공통 포맷(`success`, `data`/`error`, `traceId`, `timestamp`)을 사용한다.
+
+---
+
+## 설계 요약
+
+### 동시성·정합성
+
+- **재고**: `available - reserved` 기준 가용량 검증. 주문 시 `FOR UPDATE` + productId 오름차순 락으로 데드락 가능성 완화.
+- **재고 확정/해제**: 승인·실패 처리 시에도 `FOR UPDATE` 후 일괄 처리.
+
+### 멱등성
+
+- **승인 API**: `(paymentId, Idempotency-Key)` + 요청 해시 저장. 동일 키·동일 요청이면 저장된 응답 반환, 동일 키·다른 요청이면 409 반환.
+- **웹훅**: `(provider, providerEventId)` 유니크. 이미 처리된 이벤트면 200 + 현재 상태만 반환.
+- **배송**: at-least-once 가정. `order_id` UNIQUE + “있으면 반환, 없으면 insert”로 주문당 1건만 생성.
+
+### 이벤트 발행 (Outbox + RabbitMQ)
+
+- 결제 승인과 Outbox 적재를 **한 트랜잭션**에서 수행.
+- OutboxPublisher가 PENDING을 배치 조회 후 RabbitMQ로 발행. 실패 시 재시도, N회 초과 시 FAILED 상태로 유지하여 운영에서 확인 가능하도록 한다.
+- Shipping Consumer: `shipping.payment-authorized` 큐 구독, DLQ로 반복 실패 메시지 분리.
+
+---
+
+## 프로젝트 구조
+
+도메인별 패키지 구성. 각 도메인은 `api → application → domain ← persistence` 구조를 따른다.
 
 ```
-api
-application
-domain
-persistence
+com.example.commerce/
+├── order/                    # 주문
+│   ├── api/                  # OrderController, Request/Response DTO
+│   ├── application/          # CreateOrderUseCase, Command/Result
+│   ├── domain/               # Order, OrderStatus, 예외
+│   └── persistence/          # OrderRepository
+│
+├── payment/                  # 결제
+│   ├── api/                  # PaymentController, Authorize/Webhook DTO
+│   ├── application/         # CreatePayment, AuthorizePayment, ProcessWebhook, PaymentOutcomeApplier
+│   ├── domain/               # Payment, PaymentStatus, WebhookResultType
+│   └── persistence/         # PaymentRepository, Idempotency, WebhookEvent
+│
+├── shipping/                 # 배송
+│   ├── application/          # CreateShipmentUseCase, Consumer
+│   ├── domain/               # Shipping, ShippingStatus
+│   └── persistence/          # ShippingRepository
+│
+├── catalog/                  # 상품·재고 (order/payment에서 참조)
+│   └── InventoryRepository, ProductRepository, Inventory, Product
+│
+└── common/
+    ├── api/                  # ApiResponse, TraceIdFilter
+    ├── error/                 # ErrorCode, DomainException, GlobalExceptionHandler
+    ├── outbox/                # OutboxEvent, OutboxPublisher, OutboxEventRepository
+    └── messaging/             # RabbitMQConstants, RabbitTopologyConfig, Jackson 컨버터
 ```
-
-- api: Controller 및 요청/응답 처리
-- application: 유스케이스 및 트랜잭션 경계
-- domain: 엔티티와 상태 규칙
-- persistence: Repository
-
-도메인 모델은 JPA 기반으로 구성한 단순한 DDD 스타일을 사용했습니다.
 
 ---
 
-## 앞으로 확장할 부분
+## 에러 처리
 
-- 실제 PG 연동 및 Idempotency-Key(클라이언트 재시도) 처리
-- Outbox 패턴 기반 이벤트 발행
-- 배송 생성 및 상태 반영
-
-기능을 추가하면서도 정합성과 상태 전이가 깨지지 않도록 구조를 유지하는 것을 목표로 합니다.
+| 구분 | 방식 |
+|------|------|
+| 도메인 예외 | `DomainException` + `ErrorCode` 기반으로 HTTP 상태·코드·메시지 일관성 유지 |
+| 전역 핸들러 | `DomainException` → errorCode 기반 응답, `MethodArgumentNotValidException` → 400, 기타 → 500 |
+| 트랜잭션 | UseCase 계층에만 경계. Controller는 변환·호출만 |
 
 ---
 
 ## 테스트
 
-- 주문: 재고 부족 409, 검증 실패 400, 상품 없음 404, 동일 상품 수량 합산·빈 items·잘못된 productId 검증
-- Testcontainers 기반 동시성 통합 테스트로 초과 예약 방지 검증
-- 결제: 주문 → 결제 생성 시 `PAYMENT_PENDING`/`CREATED` 검증
-- 웹훅: AUTHORIZED 시 `PAID`·재고 확정 차감, FAILED 시 예약 해제 검증
-- 웹훅 멱등성: 동일 `providerEventId` 2회 호출 시 두 번째는 200, 상태·재고 중복 반영 없음 검증
+| 영역 | 내용 |
+|------|------|
+| Order | 재고 부족 409, 검증 400, 동일 상품 합산·락 순서. 동시성: 초과 예약 방지(Testcontainers 기반 통합 테스트) |
+| Payment | 결제 시도 → PAYMENT_PENDING/CREATED. 웹훅 AUTHORIZED/FAILED·재고. 멱등: 웹훅·승인 API 동일 키/동일 응답, 다른 payload → 409 |
+| Outbox·Shipping | 승인 → Outbox → RabbitMQ → Consumer → 배송 1건. 중복 메시지·동시 발행 시에도 배송 1건 유지 |
+| Shipping 단위 | CreateShipmentUseCase 멱등·동시 2스레드 1건. Consumer 메시지 수신 → 배송 1건 |
+
+---
+
+## 로컬 실행
+
+1. `docker compose up -d` — Postgres(5432), RabbitMQ(5672, Management 15672) 기동.
+2. `./gradlew bootRun` — 애플리케이션 실행.
+3. RabbitMQ Management: http://localhost:15672 (guest/guest).
 
 ---
 
 ## Tech Stack
 
-- Kotlin
-- Spring Boot 3
-- JPA (Hibernate)
-- PostgreSQL
-- Flyway
-- Testcontainers
+| 영역 | 기술 |
+|------|------|
+| 언어·프레임워크 | Kotlin, Spring Boot 3 |
+| DB | PostgreSQL, JPA(Hibernate), Flyway |
+| 메시징 | RabbitMQ(Spring AMQP) |
+| 테스트 | JUnit 5, Testcontainers(Postgres, RabbitMQ), Awaitility |

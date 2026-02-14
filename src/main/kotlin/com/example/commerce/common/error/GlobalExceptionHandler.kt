@@ -3,66 +3,45 @@ package com.example.commerce.common.error
 import com.example.commerce.common.api.ApiError
 import com.example.commerce.common.api.ApiResponse
 import com.example.commerce.common.api.ApiResponseSupport
-import com.example.commerce.order.domain.exception.InsufficientStockException
-import com.example.commerce.order.domain.exception.InventoryNotFoundException
-import com.example.commerce.order.domain.exception.DataInconsistencyException
-import com.example.commerce.order.domain.exception.InvalidOrderStateTransitionException
-import com.example.commerce.order.domain.exception.OrderNotFoundException
-import com.example.commerce.order.domain.exception.ProductNotFoundException
-import com.example.commerce.payment.domain.exception.PaymentNotFoundException
+import org.slf4j.LoggerFactory
 import org.springframework.http.HttpStatus
+import org.springframework.http.ResponseEntity
 import org.springframework.web.bind.MethodArgumentNotValidException
 import org.springframework.web.bind.annotation.ExceptionHandler
 import org.springframework.web.bind.annotation.ResponseStatus
 import org.springframework.web.bind.annotation.RestControllerAdvice
 
+/**
+ * 전역 예외 처리. "어떤 예외를 어떻게 응답으로 바꿀지"만 담당하고, 비즈니스 판단은 하지 않음.
+ * DomainException은 보유한 errorCode로 status/code/message 결정. 검증 실패·알 수 없는 예외만 별도 처리.
+ */
 @RestControllerAdvice
 class GlobalExceptionHandler {
 
-    @ExceptionHandler(ProductNotFoundException::class)
-    @ResponseStatus(HttpStatus.NOT_FOUND)
-    fun handleProductNotFound(ex: ProductNotFoundException): ApiResponse<Nothing> =
-        ApiResponseSupport.failure(ApiError(ErrorCode.PRODUCT_NOT_FOUND.code, ex.message ?: "Product not found"))
+    private val log = LoggerFactory.getLogger(javaClass)
 
-    @ExceptionHandler(InventoryNotFoundException::class)
-    @ResponseStatus(HttpStatus.NOT_FOUND)
-    fun handleInventoryNotFound(ex: InventoryNotFoundException): ApiResponse<Nothing> =
-        ApiResponseSupport.failure(ApiError(ErrorCode.INVENTORY_NOT_FOUND.code, ex.message ?: "Inventory not found"))
-
-    @ExceptionHandler(InsufficientStockException::class)
-    @ResponseStatus(HttpStatus.CONFLICT)
-    fun handleInsufficientStock(ex: InsufficientStockException): ApiResponse<Nothing> =
-        ApiResponseSupport.failure(
-            ApiError(ErrorCode.OUT_OF_STOCK.code, ex.message ?: "Insufficient stock for productId=${ex.productId}"),
+    @ExceptionHandler(DomainException::class)
+    fun handleDomainException(ex: DomainException): ResponseEntity<ApiResponse<Nothing>> {
+        val body = ApiResponseSupport.failure(
+            ApiError(ex.errorCode.code, ex.message ?: ex.errorCode.defaultMessage ?: "Error"),
         )
+        return ResponseEntity.status(ex.errorCode.httpStatus).body(body)
+    }
 
     @ExceptionHandler(MethodArgumentNotValidException::class)
     @ResponseStatus(HttpStatus.BAD_REQUEST)
     fun handleValidation(ex: MethodArgumentNotValidException): ApiResponse<Nothing> {
         val firstError = ex.bindingResult.fieldErrors.firstOrNull()
-        val message = firstError?.let { "${it.field}: ${it.defaultMessage}" } ?: "Validation failed"
+        val message = firstError?.let { "${it.field}: ${it.defaultMessage}" } ?: ErrorCode.INVALID_REQUEST.defaultMessage!!
         return ApiResponseSupport.failure(ApiError(ErrorCode.INVALID_REQUEST.code, message))
     }
 
-    @ExceptionHandler(PaymentNotFoundException::class)
-    @ResponseStatus(HttpStatus.NOT_FOUND)
-    fun handlePaymentNotFound(ex: PaymentNotFoundException): ApiResponse<Nothing> =
-        ApiResponseSupport.failure(ApiError(ErrorCode.PAYMENT_NOT_FOUND.code, ex.message ?: "Payment not found"))
-
-    @ExceptionHandler(OrderNotFoundException::class)
-    @ResponseStatus(HttpStatus.NOT_FOUND)
-    fun handleOrderNotFound(ex: OrderNotFoundException): ApiResponse<Nothing> =
-        ApiResponseSupport.failure(ApiError(ErrorCode.ORDER_NOT_FOUND.code, ex.message ?: "Order not found"))
-
-    @ExceptionHandler(InvalidOrderStateTransitionException::class)
-    @ResponseStatus(HttpStatus.CONFLICT)
-    fun handleInvalidOrderStateTransition(ex: InvalidOrderStateTransitionException): ApiResponse<Nothing> =
-        ApiResponseSupport.failure(
-            ApiError(ErrorCode.INVALID_ORDER_STATE_TRANSITION.code, ex.message ?: "Invalid order state transition"),
+    @ExceptionHandler(Throwable::class)
+    @ResponseStatus(HttpStatus.INTERNAL_SERVER_ERROR)
+    fun handleUnknown(ex: Throwable): ApiResponse<Nothing> {
+        log.error("Unhandled exception", ex)
+        return ApiResponseSupport.failure(
+            ApiError(ErrorCode.INTERNAL_ERROR.code, ErrorCode.INTERNAL_ERROR.defaultMessage!!),
         )
-
-    @ExceptionHandler(DataInconsistencyException::class)
-    @ResponseStatus(HttpStatus.CONFLICT)
-    fun handleDataInconsistency(ex: DataInconsistencyException): ApiResponse<Nothing> =
-        ApiResponseSupport.failure(ApiError(ErrorCode.DATA_INCONSISTENCY.code, ex.message ?: "Data inconsistency"))
+    }
 }

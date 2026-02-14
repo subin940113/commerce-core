@@ -2,15 +2,21 @@ package com.example.commerce.payment.api
 
 import com.example.commerce.common.api.ApiResponse
 import com.example.commerce.common.api.ApiResponseSupport
+import com.example.commerce.common.error.DomainException
+import com.example.commerce.common.error.ErrorCode
+import com.example.commerce.payment.application.AuthorizePaymentCommand
 import com.example.commerce.payment.application.CreatePaymentCommand
 import com.example.commerce.payment.application.MockWebhookCommand
+import com.example.commerce.payment.application.usecase.AuthorizePaymentUseCase
 import com.example.commerce.payment.application.usecase.CreatePaymentUseCase
 import com.example.commerce.payment.application.usecase.ProcessPaymentWebhookUseCase
 import com.example.commerce.payment.domain.WebhookResultType
 import jakarta.validation.Valid
 import org.springframework.http.HttpStatus
+import org.springframework.web.bind.annotation.PathVariable
 import org.springframework.web.bind.annotation.PostMapping
 import org.springframework.web.bind.annotation.RequestBody
+import org.springframework.web.bind.annotation.RequestHeader
 import org.springframework.web.bind.annotation.RequestMapping
 import org.springframework.web.bind.annotation.ResponseStatus
 import org.springframework.web.bind.annotation.RestController
@@ -20,6 +26,7 @@ import org.springframework.web.bind.annotation.RestController
 class PaymentController(
     private val createPaymentUseCase: CreatePaymentUseCase,
     private val processPaymentWebhookUseCase: ProcessPaymentWebhookUseCase,
+    private val authorizePaymentUseCase: AuthorizePaymentUseCase,
 ) {
 
     @PostMapping
@@ -32,6 +39,36 @@ class PaymentController(
                 orderId = result.orderId,
                 status = result.status.name,
                 amount = result.amount,
+            ),
+        )
+    }
+
+    @PostMapping("/{paymentId}/authorize")
+    fun authorizePayment(
+        @PathVariable paymentId: Long,
+        @RequestHeader("Idempotency-Key") idempotencyKey: String?,
+        @Valid @RequestBody request: AuthorizePaymentRequest,
+    ): ApiResponse<WebhookResponse> {
+        val key = idempotencyKey?.takeIf { it.isNotBlank() }
+            ?: throw DomainException(ErrorCode.INVALID_REQUEST, "Idempotency-Key header is required")
+        val resultType = try {
+            WebhookResultType.valueOf(request.result)
+        } catch (e: IllegalArgumentException) {
+            throw DomainException(ErrorCode.INVALID_REQUEST, "Invalid result: ${request.result}. Allowed: AUTHORIZED, FAILED")
+        }
+        val result = authorizePaymentUseCase.execute(
+            AuthorizePaymentCommand(
+                paymentId = paymentId,
+                idempotencyKey = key,
+                result = resultType,
+                providerPaymentId = request.providerPaymentId,
+            ),
+        )
+        return ApiResponseSupport.success(
+            WebhookResponse(
+                paymentId = result.paymentId,
+                status = result.status,
+                orderStatus = result.orderStatus,
             ),
         )
     }

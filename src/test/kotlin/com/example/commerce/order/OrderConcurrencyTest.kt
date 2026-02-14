@@ -2,8 +2,8 @@ package com.example.commerce.order
 
 import com.example.commerce.TestcontainersConfiguration
 import com.example.commerce.order.application.CreateOrderCommand
-import com.example.commerce.order.application.OrderApplicationService
 import com.example.commerce.order.application.OrderItemCommand
+import com.example.commerce.order.application.usecase.CreateOrderUseCase
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -23,7 +23,7 @@ import java.util.concurrent.atomic.AtomicInteger
 class OrderConcurrencyTest {
 
     @Autowired
-    private lateinit var orderApplicationService: OrderApplicationService
+    private lateinit var createOrderUseCase: CreateOrderUseCase
 
     @Autowired
     private lateinit var inventoryRepository: com.example.commerce.catalog.InventoryRepository
@@ -50,7 +50,7 @@ class OrderConcurrencyTest {
                 try {
                     latch.countDown()
                     latch.await()
-                    orderApplicationService.createOrder(command)
+                    createOrderUseCase.execute(command)
                     successCount.incrementAndGet()
                 } catch (e: Throwable) {
                     errors.add(e)
@@ -87,7 +87,7 @@ class OrderConcurrencyTest {
                 try {
                     latch.countDown()
                     latch.await()
-                    orderApplicationService.createOrder(command)
+                    createOrderUseCase.execute(command)
                     successCount.incrementAndGet()
                 } catch (e: Throwable) {
                     errors.add(e)

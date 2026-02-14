@@ -1,7 +1,10 @@
-package com.example.commerce.order.application
+package com.example.commerce.order.application.usecase
 
 import com.example.commerce.catalog.InventoryRepository
 import com.example.commerce.catalog.ProductRepository
+import com.example.commerce.order.application.CreateOrderCommand
+import com.example.commerce.order.application.CreateOrderResult
+import com.example.commerce.order.application.OrderItemCommand
 import com.example.commerce.order.domain.Order
 import com.example.commerce.order.domain.OrderItem
 import com.example.commerce.order.domain.OrderStatus
@@ -14,27 +17,26 @@ import org.springframework.transaction.annotation.Transactional
 
 /**
  * 주문 생성 유스케이스.
- * - DDD Lite: 도메인 엔티티는 JPA Entity 그대로 사용.
- * - 가용 예약 수량 = available_qty - reserved_qty.
- * - 재고 락은 productId 오름차순으로 고정하여 데드락 방지.
+ * 동시 주문에서 초과 예약이 나지 않도록 재고 행을 FOR UPDATE로 잠근 뒤 검증·예약만 수행한다.
+ * 락 순서를 productId 오름차순으로 고정해 데드락 가능성을 낮춘다.
+ * 결제 전에는 available을 줄이지 않고 reserved로 홀드한다.
+ * 결제 실패/만료 시 예약 해제만 하면 된다.
  */
 @Service
-class OrderApplicationService(
+class CreateOrderUseCase(
     private val productRepository: ProductRepository,
     private val inventoryRepository: InventoryRepository,
     private val orderRepository: OrderRepository,
 ) {
 
     @Transactional
-    fun createOrder(command: CreateOrderCommand): CreateOrderResult {
-        // 1. 입력 정규화 (동일 productId 합산)
-        // 2. productId 오름차순 정렬
+    fun execute(command: CreateOrderCommand): CreateOrderResult {
         val normalized = normalizeItems(command.items)
 
-        // 3. 재고 락 획득 (FOR UPDATE) + 4. 재고 예약 처리 (dirty checking)
         val lineItems = mutableListOf<OrderItem>()
         var totalAmount = 0L
 
+        // productId 오름차순 락으로 데드락 가능성을 낮춤. 가용량은 available - reserved 기준.
         for (item in normalized) {
             val product = productRepository.findById(item.productId)
                 .orElseThrow { ProductNotFoundException(item.productId) }
@@ -61,8 +63,6 @@ class OrderApplicationService(
             )
         }
 
-        // 5. Order 엔티티 생성
-        // 6. OrderItem 추가
         val order = Order(
             userId = command.userId,
             status = OrderStatus.CREATED,
@@ -74,10 +74,7 @@ class OrderApplicationService(
         )
         lineItems.forEach { order.addItem(it) }
 
-        // 7. 저장
         val saved = orderRepository.save(order)
-
-        // 8. Result 반환
         return CreateOrderResult(
             orderId = saved.id,
             status = saved.status,
@@ -85,7 +82,11 @@ class OrderApplicationService(
         )
     }
 
-    /** 동일 productId 합산 후 productId 오름차순 정렬(락 순서 고정). */
+    /**
+     * 동일 상품이 여러 번 들어올 수 있어 수량을 합산한다.
+     * 이후 productId 오름차순으로 정렬해 재고 락을 항상 같은 순서로 잡도록 맞춘다.
+     * 동시 주문 시 교착 가능성을 낮추기 위한 전처리다.
+     */
     private fun normalizeItems(items: List<OrderItemCommand>): List<OrderItemCommand> =
         items
             .groupBy { it.productId }

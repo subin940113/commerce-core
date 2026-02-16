@@ -8,6 +8,8 @@ import com.example.commerce.common.outbox.OutboxEventRepository
 import com.example.commerce.common.outbox.OutboxStatus
 import com.example.commerce.order.domain.Order
 import com.example.commerce.order.domain.OrderStatus
+import com.example.commerce.order.domain.exception.DataInconsistencyException
+import com.example.commerce.order.domain.exception.InventoryNotFoundException
 import com.example.commerce.payment.domain.Payment
 import com.example.commerce.payment.domain.PaymentStatus
 import org.springframework.stereotype.Component
@@ -57,9 +59,9 @@ class PaymentOutcomeApplier(
         val items = order.items.sortedBy { it.productId }
         for (item in items) {
             val inv = inventoryRepository.findByProductIdForUpdate(item.productId)
-                ?: throw com.example.commerce.order.domain.exception.InventoryNotFoundException(item.productId)
+                ?: throw InventoryNotFoundException(item.productId)
             if (inv.reservedQty < item.qty) {
-                throw com.example.commerce.order.domain.exception.DataInconsistencyException(
+                throw DataInconsistencyException(
                     "Insufficient reserved qty for productId=${item.productId}: reserved=${inv.reservedQty}, required=${item.qty}",
                 )
             }
@@ -72,9 +74,9 @@ class PaymentOutcomeApplier(
         val items = order.items.sortedBy { it.productId }
         for (item in items) {
             val inv = inventoryRepository.findByProductIdForUpdate(item.productId)
-                ?: throw com.example.commerce.order.domain.exception.InventoryNotFoundException(item.productId)
+                ?: throw InventoryNotFoundException(item.productId)
             if (inv.reservedQty < item.qty) {
-                throw com.example.commerce.order.domain.exception.DataInconsistencyException(
+                throw DataInconsistencyException(
                     "Insufficient reserved qty for release productId=${item.productId}: reserved=${inv.reservedQty}, requested=${item.qty}",
                 )
             }

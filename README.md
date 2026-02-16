@@ -19,13 +19,13 @@ Spring Boot + Kotlin 기반 커머스 서버이며, 주문 → 결제 → 배송
 
 ## 비즈니스 흐름
 
-1. **주문 생성** — 재고 예약(`reserved` 증가), 결제 전까지 `available`은 유지
+1. **주문 생성** — 재고 예약(`reserved` 증가), 결제 전까지 `available` 유지
 2. **결제 시도** — 주문 상태를 `PAYMENT_PENDING`으로 변경
 3. **결제 승인** — 두 경로 지원
    - **승인 API**: `POST /payments/{id}/authorize` + `Idempotency-Key` (클라이언트 재시도 대비)
    - **웹훅**: PG → 서버 콜백, `providerEventId` 기준 멱등
-4. **승인 처리** — 주문 상태를 PAID로 변경, 재고 확정 차감, Outbox에 `PAYMENT_AUTHORIZED` 기록(같은 트랜잭션)
-5. **Outbox 발행** — PENDING 이벤트를 RabbitMQ로 발행, 다중 인스턴스 시 `FOR UPDATE SKIP LOCKED`로 분배
+4. **승인 처리** — 주문 상태를 `PAID`로 변경, 재고 확정 차감, Outbox에 `PAYMENT_AUTHORIZED` 기록(같은 트랜잭션)
+5. **Outbox 발행** — `PENDING` 이벤트를 RabbitMQ로 발행, 다중 인스턴스 시 `FOR UPDATE SKIP LOCKED`로 분배
 6. **배송 생성** — Consumer가 큐에서 수신 후 `CreateShipmentUseCase` 호출, `order_id` UNIQUE로 멱등
 
 자세한 단계·보장 성질은 [docs/flow.md](docs/flow.md) 참고
@@ -38,7 +38,7 @@ Spring Boot + Kotlin 기반 커머스 서버이며, 주문 → 결제 → 배송
 |------|--------|------|------|
 | 주문 생성 | POST | `/api/v1/orders` | body: userId, items |
 | 결제 시도 | POST | `/api/v1/payments` | body: orderId |
-| 결제 승인 | POST | `/api/v1/payments/{paymentId}/authorize` | Header: `Idempotency-Key` 필수, body: result(AUTHORIZED/FAILED), providerPaymentId(선택) |
+| 결제 승인 | POST | `/api/v1/payments/{paymentId}/authorize` | Header: `Idempotency-Key` 필수, body: result(`AUTHORIZED`/`FAILED`), providerPaymentId(선택) |
 | 결제 웹훅(모의) | POST | `/api/v1/payments/webhooks/mock` | body: provider, providerEventId, paymentId, result |
 
 응답은 공통 포맷(`success`, `data`/`error`, `traceId`, `timestamp`)을 사용한다.
@@ -49,25 +49,34 @@ Spring Boot + Kotlin 기반 커머스 서버이며, 주문 → 결제 → 배송
 
 ### 동시성·정합성
 
-- **재고**: `available - reserved` 기준 가용량 검증, 주문 시 `FOR UPDATE` + productId 오름차순 락으로 데드락 가능성 완화
-- **재고 확정/해제**: 승인·실패 처리 시에도 `FOR UPDATE` 후 일괄 처리
+| 구분 | 내용 |
+|------|------|
+| 가용량 | `available - reserved` 기준으로 주문·승인 시 검증 |
+| 주문 시 | 행 락(`FOR UPDATE`) + productId 오름차순 락으로 데드락 완화 |
+| 승인·실패 시 | 동일 방식으로 재고 확정 또는 예약 해제 일괄 처리 |
 
 ### 상태 전이 제어
 
-- **주문**: CREATED → PAYMENT_PENDING → PAID, 결제 시도는 CREATED일 때만 허용, 잘못된 전이 차단
-- **결제**: 승인 API·웹훅 모두 허용 상태에서만 처리 후 주문·재고·Outbox 일괄 반영
+| 대상 | 전이 | 조건 |
+|------|------|------|
+| 주문 | `CREATED` → `PAYMENT_PENDING` → `PAID` | 결제 시도는 `CREATED`일 때만 허용, 그 외 전이 차단 |
+| 결제 | 승인 API·웹훅 처리 | 허용 상태에서만 처리 후 주문·재고·Outbox 일괄 반영 |
 
 ### 멱등성
 
-- **승인 API**: `(paymentId, Idempotency-Key)` + 요청 해시 저장. 동일 키·동일 요청이면 저장된 응답 반환, 동일 키·다른 요청이면 409 반환한다.
-- **웹훅**: `(provider, providerEventId)` 유니크. 이미 처리된 이벤트면 200 + 현재 상태만 반환한다.
-- **배송**: at-least-once 가정, `order_id` UNIQUE + “있으면 반환, 없으면 insert”로 주문당 1건만 생성
+| 대상 | 키 | 동작 |
+|------|-----|------|
+| 승인 API | `(paymentId, Idempotency-Key)` + 요청 해시 | 동일 키·동일 요청 → 기존 응답 반환, 동일 키·다른 요청 → `409` |
+| 웹훅 | `(provider, providerEventId)` 유니크 | 이미 처리된 이벤트 → `200` + 현재 상태 반환 |
+| 배송 | `order_id` UNIQUE | at-least-once 가정, "있으면 반환, 없으면 insert"로 주문당 1건만 생성 |
 
 ### 이벤트 발행 (Outbox + RabbitMQ)
 
-- 결제 승인과 Outbox 적재를 **한 트랜잭션**에서 수행
-- OutboxPublisher가 PENDING을 배치 조회 후 RabbitMQ로 발행. 실패 시 재시도, N회 초과 시 FAILED 상태로 유지하여 운영에서 확인 가능하도록 한다.
-- Shipping Consumer: `shipping.payment-authorized` 큐 구독, DLQ로 반복 실패 메시지 분리
+| 구분 | 내용 |
+|------|------|
+| 트랜잭션 | 결제 승인과 Outbox 적재를 한 트랜잭션에서 수행 |
+| OutboxPublisher | `PENDING` 이벤트 배치 조회 → RabbitMQ 발행, 실패 시 재시도·N회 초과 시 `FAILED`로 유지(운영 확인용) |
+| Shipping Consumer | `shipping.payment-authorized` 큐 구독, 반복 실패 메시지는 DLQ로 분리 |
 
 ---
 
@@ -111,19 +120,19 @@ com.example.commerce/
 | 구분 | 방식 |
 |------|------|
 | 도메인 예외 | `DomainException` + `ErrorCode` 기반으로 HTTP 상태·코드·메시지 일관성 유지 |
-| 전역 핸들러 | `DomainException` → errorCode 기반 응답, `MethodArgumentNotValidException` → 400, 기타 → 500 |
+| 전역 핸들러 | `DomainException` → errorCode 기반 응답, `MethodArgumentNotValidException` → `400`, 기타 → `500` |
 | 트랜잭션 | UseCase 계층에만 경계, Controller는 변환·호출만 |
 
 ---
 
 ## 테스트
 
-| 영역 | 내용 |
+| 영역 | 검증 내용 |
 |------|------|
-| Order | 재고 부족 409, 검증 400, 동일 상품 합산·락 순서, 동시성 초과 예약 방지(Testcontainers 기반 통합 테스트) |
-| Payment | 결제 시도 → PAYMENT_PENDING/CREATED, 웹훅 AUTHORIZED/FAILED·재고, 멱등(웹훅·승인 API 동일 키/동일 응답, 다른 payload → 409) |
-| Outbox·Shipping | 승인 → Outbox → RabbitMQ → Consumer → 배송 1건, 중복 메시지·동시 발행 시에도 배송 1건 유지 |
-| Shipping 단위 | CreateShipmentUseCase 멱등·동시 2스레드 1건, Consumer 메시지 수신 → 배송 1건 |
+| Order | 재고 부족 → `409`, 검증 실패 → `400`, 동일 상품 합산·락 순서, 동시성 초과 예약 방지(Testcontainers 통합) |
+| Payment | 결제 시도 → `PAYMENT_PENDING`/`CREATED`, 웹훅 `AUTHORIZED`/`FAILED` 시 재고 반영, 멱등(동일 키 → 동일 응답, 다른 payload → `409`) |
+| Outbox·Shipping | 승인 → Outbox → RabbitMQ → Consumer → 배송 1건, 중복·동시 발행 시에도 1건 유지 |
+| Shipping 단위 | CreateShipmentUseCase 멱등·동시 2스레드 시 1건만 생성, Consumer 수신 → 배송 1건 생성 |
 
 ---
 
